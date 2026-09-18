@@ -1,0 +1,17 @@
+{
+  "name": "Order Flow Python",
+  "dockerComposeFile": ["../compose.yaml", "compose.dev.yaml"],
+  "service": "devcontainer",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "app",
+  "shutdownAction": "stopCompose",
+  "runServices": ["devcontainer", "api", "broadcaster", "ingestion"],
+  "initializeCommand": "python3 scripts/setup_env.py",
+  "forwardPorts": [8000, 8123, 9101, 9102],
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "ms-python.vscode-pylance", "charliermarsh.ruff"],
+      "settings": {"python.defaultInterpreterPath": "/usr/local/bin/python"}
+    }
+  }
+}

@@ -1,0 +1,7 @@
+<clickhouse>
+    <kafka>
+        <!-- Applies only when there is no valid committed consumer offset. -->
+        <auto_offset_reset>earliest</auto_offset_reset>
+        <enable_auto_commit>false</enable_auto_commit>
+    </kafka>
+</clickhouse>

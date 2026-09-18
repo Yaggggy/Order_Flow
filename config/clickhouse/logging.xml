@@ -1,0 +1,9 @@
+<clickhouse>
+    <logger>
+        <level>warning</level>
+        <console>true</console>
+        <size>100M</size>
+        <count>3</count>
+    </logger>
+    <timezone>UTC</timezone>
+</clickhouse>

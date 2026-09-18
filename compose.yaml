@@ -1,0 +1,234 @@
+name: order-flow
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-app-env: &app-env
+  CLICKHOUSE_HOST: clickhouse
+  CLICKHOUSE_PORT: "8123"
+  CLICKHOUSE_DATABASE: order_flow
+  CLICKHOUSE_USER: orderflow
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Run python scripts/setup_env.py first}
+  REDIS_URL: redis://:${REDIS_PASSWORD:?Run python scripts/setup_env.py first}@redis:6379/0
+  API_KEY: ${API_KEY:?Run python scripts/setup_env.py first}
+  SYMBOLS: ${SYMBOLS:-BTCUSDT}
+  MAX_PRICE_LEVELS: ${MAX_PRICE_LEVELS:-50000}
+  QUERY_TIMEOUT_SECONDS: "5"
+  QUERY_CONCURRENCY: "8"
+  WS_MAX_CLIENTS: "500"
+
+x-app: &app
+  build:
+    context: .
+    target: runtime
+  image: order-flow-app:local
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 40s
+  logging: *logging
+  networks: [pipeline]
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:v25.1.5
+    command:
+      - redpanda
+      - start
+      - --mode
+      - dev-container
+      - --smp
+      - "2"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://localhost:19092
+      - --rpc-addr
+      - 0.0.0.0:33145
+      - --advertise-rpc-addr
+      - redpanda:33145
+      - --set
+      - redpanda.auto_create_topics_enabled=false
+    ports:
+      - "127.0.0.1:19092:19092"
+      - "127.0.0.1:9644:9644"
+    volumes: [redpanda-data:/var/lib/redpanda/data]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health --exit-when-healthy >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+    logging: *logging
+    networks: [pipeline]
+
+
+  topic-init:
+    image: redpandadata/redpanda:v25.1.5
+    entrypoint: [/bin/sh, /scripts/init-topic.sh]
+    volumes: [./scripts/init-topic.sh:/scripts/init-topic.sh:ro]
+    depends_on:
+      redpanda: {condition: service_healthy}
+    restart: "no"
+    logging: *logging
+    networks: [pipeline]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3.3.42
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD:?Run python scripts/setup_env.py first}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports: ["127.0.0.1:8123:8123"]
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./config/clickhouse/kafka.xml:/etc/clickhouse-server/config.d/kafka.xml:ro
+      - ./config/clickhouse/logging.xml:/etc/clickhouse-server/config.d/logging.xml:ro
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    healthcheck:
+      test: [CMD-SHELL, 'clickhouse-client --user default --password "$$CLICKHOUSE_PASSWORD" --query "SELECT 1" >/dev/null']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    logging: *logging
+    networks: [pipeline]
+
+  schema-init:
+    image: clickhouse/clickhouse-server:25.3.3.42
+    entrypoint: [/bin/sh, /scripts/init-clickhouse.sh]
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: orderflow
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Run python scripts/setup_env.py first}
+      CLICKHOUSE_ADMIN_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD:?Run python scripts/setup_env.py first}
+    volumes:
+      - ./sql:/sql:ro
+      - ./scripts/init-clickhouse.sh:/scripts/init-clickhouse.sh:ro
+    depends_on:
+      clickhouse: {condition: service_healthy}
+      topic-init: {condition: service_completed_successfully}
+    restart: "no"
+    logging: *logging
+    networks: [pipeline]
+
+  redis:
+    image: redis:7.4.4-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Run python scripts/setup_env.py first}
+    command:
+      - /bin/sh
+      - -ec
+      - 'exec redis-server --appendonly yes --appendfsync everysec --requirepass "$$REDIS_PASSWORD" --maxmemory 256mb --maxmemory-policy noeviction --client-output-buffer-limit pubsub 16mb 8mb 30'
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    logging: *logging
+    networks: [pipeline]
+
+  ingestion:
+    <<: *app
+    command: [python, -m, services.ingestion.main]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_TOPIC: market.ticks
+      INGESTION_MODE: ${INGESTION_MODE:-synthetic}
+      SYMBOLS: ${SYMBOLS:-BTCUSDT}
+      SYNTHETIC_TICKS_PER_SECOND: ${SYNTHETIC_TICKS_PER_SECOND:-1500}
+      BINANCE_WS_BASE: wss://stream.binance.com:9443/ws
+      INGESTION_METRICS_PORT: "9101"
+      KAFKA_FLUSH_TIMEOUT_SECONDS: "10"
+    ports: ["127.0.0.1:9101:9101"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:9101/', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      schema-init: {condition: service_completed_successfully}
+
+  broadcaster:
+    <<: *app
+    command: [python, -m, services.broadcaster.main]
+    environment:
+      <<: *app-env
+      BROADCAST_INTERVAL_SECONDS: "1"
+      BROADCAST_LOOKBACK_MINUTES: ${BROADCAST_LOOKBACK_MINUTES:-3}
+      SNAPSHOT_TTL_SECONDS: "15"
+      BROADCASTER_METRICS_PORT: "9102"
+    ports: ["127.0.0.1:9102:9102"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:9102/', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      schema-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  api:
+    <<: *app
+    command: [uvicorn, services.api.main:app, --host, 0.0.0.0, --port, "8000", --workers, "1", --no-proxy-headers, --ws-max-size, "16384", --ws-ping-interval, "20", --ws-ping-timeout, "20", --timeout-graceful-shutdown, "10"]
+    environment:
+      <<: *app-env
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+    ports: ["127.0.0.1:8000:8000"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=7).read()"]
+      interval: 10s
+      timeout: 8s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      schema-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  tests:
+    <<: *app
+    build: {context: ., target: development}
+    image: order-flow-dev:local
+    profiles: [test]
+    restart: "no"
+    command: [pytest, -q, -m, integration]
+    environment:
+      <<: *app-env
+      CLICKHOUSE_ADMIN_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD:?Run python scripts/setup_env.py first}
+      CLICKHOUSE_HTTP_URL: http://clickhouse:8123/
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      ORDERFLOW_API_URL: http://api:8000
+      ORDERFLOW_WS_URL: ws://api:8000/ws/orderbook
+    depends_on:
+      api: {condition: service_healthy}
+      broadcaster: {condition: service_started}
+      ingestion: {condition: service_started}
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    working_dir: /app
+
+volumes:
+  redpanda-data:
+  clickhouse-data:
+  redis-data:
+
+networks:
+  pipeline:
+    driver: bridge

@@ -1,0 +1,23 @@
+# Paths are relative to the FIRST Compose file (the repository root).
+services:
+  devcontainer:
+    build: {context: ., target: development}
+    image: order-flow-dev:local
+    command: [sleep, infinity]
+    volumes: [.:/workspace:cached]
+    working_dir: /workspace
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_DATABASE: order_flow
+      CLICKHOUSE_USER: orderflow
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_ADMIN_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD}
+      CLICKHOUSE_HTTP_URL: http://clickhouse:8123/
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      API_KEY: ${API_KEY}
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      ORDERFLOW_API_URL: http://api:8000
+      ORDERFLOW_WS_URL: ws://api:8000/ws/orderbook
+    networks: [pipeline]
+    init: true

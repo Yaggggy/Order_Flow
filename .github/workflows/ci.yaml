@@ -1,0 +1,23 @@
+name: order-flow-ci
+on: [push, pull_request]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install --require-hashes -r requirements-dev.lock
+      - run: ruff check . && pytest -q
+      - run: python scripts/setup_env.py && docker compose config --quiet
+      - run: docker compose up -d --build
+      - run: docker compose --profile test run --rm tests
+      - name: Reconcile a 1500 tick/sec finite load
+        run: docker compose --profile test run --rm tests python scripts/load_test.py --rate 1500 --seconds 5
+      - name: Capture service logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v

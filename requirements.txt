@@ -1,0 +1,8 @@
+clickhouse-connect==0.8.18
+confluent-kafka==2.10.1
+fastapi==0.115.12
+prometheus-client==0.22.1
+pydantic==2.11.7
+redis==6.2.0
+uvicorn[standard]==0.34.3
+websockets==15.0.1
